@@ -1,7 +1,5 @@
 use anchor_lang::prelude::*;
 use solana_program::{
-    instruction::Instruction,
-    sysvar::instructions::{load_instruction_at_checked},
     pubkey::Pubkey,
     system_instruction,
     program::{invoke},
@@ -11,6 +9,7 @@ use anchor_spl::{
     token::{ Transfer, Burn }
 };
 use anchor_lang::context::Context;
+use pyth_sdk_solana::{load_price_feed_from_account_info};
 use crate::{error::ErrorCode};
 
 pub mod contexts;
@@ -18,13 +17,13 @@ pub use contexts::*;
 
 pub mod error;
 
-declare_id!("Ex1dEkyy4hF6ranqa5WcGV2X4hHpdd3JUJ5arocXtBEz");
+declare_id!("FFcjp1c7oRK6adHWJpjbzdA2X4e7bFxGTGkKReEiGXwT");
 
 #[program]
 pub mod choobin {
     use super::*;
 
-    pub fn initialize(ctx: Context<Initialize>) -> Result<()> {
+    pub fn initialize(ctx: Context<Initialize>, price: u64, private_price: u64, end_timestamp: u64) -> Result<()> {
         let presale_info = &mut ctx.accounts.presale_info;
         let initializer: &Signer = &ctx.accounts.initializer;
         let mint = &ctx.accounts.mint;
@@ -35,10 +34,11 @@ pub mod choobin {
         presale_info.is_initialized = true;
         presale_info.admin = initializer.to_account_info().key();
         presale_info.mint = mint.to_account_info().key();
-        presale_info.amount = 0;
-        presale_info.price = 3500;    // 1 choobin = 0.0000035 SOL
-        presale_info.end_timestamp = 0;
         presale_info.treasury = treasury.to_account_info().key();
+        presale_info.amount = 0;
+        presale_info.price = price;
+        presale_info.private_price = private_price;
+        presale_info.end_timestamp = end_timestamp;
 
         Ok(())
     }
@@ -119,9 +119,11 @@ pub mod choobin {
         Ok(())
     }
 
-    pub fn set_price(ctx: Context<SetPrice>, price: u64) -> Result<()> {
+    pub fn set_price(ctx: Context<SetPrice>, price: u64, private_price: u64) -> Result<()> {
         let presale_info = &mut ctx.accounts.presale_info;
         presale_info.price = price;
+        presale_info.private_price = private_price;
+
         Ok(())
     }
 
@@ -138,11 +140,14 @@ pub mod choobin {
         Ok(())
     }
 
-    pub fn buy_token(ctx: Context<BuyToken>, lamports: u64) -> Result<()> {
+    pub fn buy_token(ctx: Context<BuyToken>, lamports: u64, is_private: bool) -> Result<()> {
         let presale_info = &mut ctx.accounts.presale_info;
         let user_info = &mut ctx.accounts.user_info;
         let user: &Signer = &ctx.accounts.user;
         let treasury = &ctx.accounts.treasury;
+        let price_account_info = &ctx.accounts.price_feed;
+
+        require!(!is_private || lamports >= 5_000_000_000, ErrorCode::InvalidMinimumSol);
 
         //--- send sol -> treasury ---------
         let sol_ix = system_instruction::transfer(
@@ -150,7 +155,7 @@ pub mod choobin {
             treasury.key,
             lamports,
         );
-        anchor_lang::solana_program::program::invoke(
+        invoke(
             &sol_ix,
             &[
                 user.to_account_info(),
@@ -180,8 +185,20 @@ pub mod choobin {
         };
         let cpi_program = ctx.accounts.token_program.to_account_info();
         let cpi_ctx = CpiContext::new_with_signer(cpi_program, cpi_accounts, signer);
-        let amount = (lamports * 1000000 / presale_info.price) as u64;
-        token::transfer(cpi_ctx, amount)?;    
+
+        let price_feed = load_price_feed_from_account_info( &price_account_info ).unwrap();
+        let current_timestamp = Clock::get()?.unix_timestamp;
+        let current_price = price_feed.get_price_no_older_than(current_timestamp, STALENESS_THRESHOLD).unwrap();
+        let mut amount = (
+            u64::try_from(current_price.price).unwrap() - u64::try_from(current_price.conf).unwrap()
+        ) * 1_000_000 * lamports;
+        if is_private {
+            amount = (amount * 1_000 / presale_info.private_price / 10u64.pow(u32::try_from(-current_price.expo).unwrap())) as u64;
+        } else {
+            amount = (amount * 1_000 / presale_info.price / 10u64.pow(u32::try_from(-current_price.expo).unwrap())) as u64;
+        }
+
+        token::transfer(cpi_ctx, amount)?;
 
         //---- update data -----------
         presale_info.amount -= amount;

@@ -3,11 +3,16 @@ use anchor_spl::{
     associated_token::AssociatedToken,
     token::{TokenAccount, Mint, Token}
 };
+use std::str::FromStr;
 use std::mem::size_of;
+
+use crate::{error::ErrorCode};
 
 pub const DISCRIMINATOR_LENGTH: usize = 8;
 pub const PRESALE_INFO_SEED: &str = "presale_info";
 pub const USER_INFO_SEED: &str = "user_info";
+pub const SOL_USD_FEED: &str = "J83w4HKfqxwcq3BEMMkPFSppX3gqekLyLJBexebFVkix";
+pub const STALENESS_THRESHOLD: u64 = 60;
 
 #[account]
 pub struct PresaleInfo {
@@ -16,6 +21,7 @@ pub struct PresaleInfo {
     pub mint: Pubkey,
     pub amount: u64,
     pub price: u64,
+    pub private_price: u64,
     pub end_timestamp: u64,
     pub treasury: Pubkey,
 }
@@ -191,6 +197,9 @@ pub struct BuyToken<'info> {
     /// CHECK: This is not dangerous because we don't read or write from this account
     #[account(mut, constraint = treasury.key() == presale_info.treasury)]
     pub treasury: AccountInfo<'info>,
+
+    #[account(address = Pubkey::from_str(SOL_USD_FEED).unwrap() @ ErrorCode::InvalidPriceFeed)]
+    pub price_feed: AccountInfo<'info>,
 
     pub system_program: Program<'info, System>,
     pub token_program: Program<'info, Token>,
